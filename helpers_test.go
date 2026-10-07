@@ -2,6 +2,11 @@ package cog
 
 import (
 	"context"
+	"go/ast"
+	"go/importer"
+	"go/parser"
+	"go/token"
+	"go/types"
 	"testing"
 
 	"cuelang.org/go/cue/cuecontext"
@@ -9,6 +14,78 @@ import (
 	"github.com/grafana/cog/internal/testutils"
 	"github.com/stretchr/testify/require"
 )
+
+func TestTypesFromSchema_OutputGo_EnumMemberNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		schema    string
+		wantError string
+	}{
+		{
+			name:      "punctuation-only member collides with enum type",
+			schema:    `Foo: { baz: "foo" | "*" }`,
+			wantError: `Go enum "sandbox.FooBaz": member "*" generates identifier "FooBaz", which conflicts with object "FooBaz"; set explicit, distinct enum member names`,
+		},
+		{
+			name:      "multiple punctuation-only members",
+			schema:    `Foo: { baz: "*" | "@" }`,
+			wantError: `set explicit, distinct enum member names`,
+		},
+		{
+			name:      "members normalize to the same identifier",
+			schema:    `Foo: { baz: "@value" | "-value" }`,
+			wantError: `Go enums "sandbox.FooBaz" and "sandbox.FooBaz": members "@value" and "-value" generate the same identifier "FooBazValue"; set explicit, distinct enum member names`,
+		},
+		{
+			name: "members from different enums collide",
+			schema: `Foo: "barBaz" | "x"
+FooBar: "baz" | "y"`,
+			wantError: `Go enums "sandbox.Foo" and "sandbox.FooBar": members "barBaz" and "baz" generate the same identifier "FooBarBaz"; set explicit, distinct enum member names`,
+		},
+		{
+			name: "member collides with another enum type",
+			schema: `Foo: "bar" | "baz"
+FooBar: "one" | "two"`,
+			wantError: `Go enum "sandbox.Foo": member "bar" generates identifier "FooBar", which conflicts with object "FooBar"; set explicit, distinct enum member names`,
+		},
+		{
+			name:   "explicit member names preserve punctuation values",
+			schema: `Foo: { baz: "foo" | "bar" | "*" | "@" | "@value" | "-value" @cog(kind="enum",memberNames="foo|bar|all|at|atValue|negateValue") }`,
+		},
+		{
+			name: "empty and numeric member names remain supported",
+			schema: `Foo: "" | "foo"
+Bar: -1 | 0 | 1 @cog(kind="enum",memberNames="-1|zero|one")`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cueValue := cuecontext.New().CompileString(tt.schema)
+			require.NoError(t, cueValue.Err())
+
+			files, err := TypesFromSchema().CUEValue("sandbox", cueValue).Golang(GoConfig{}).Run(context.Background())
+			if tt.wantError != "" {
+				require.ErrorContains(t, err, tt.wantError)
+				require.Empty(t, files)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, files, 1)
+
+			fileSet := token.NewFileSet()
+			file, err := parser.ParseFile(fileSet, files[0].RelativePath, files[0].Data, 0)
+			require.NoError(t, err)
+			config := types.Config{Importer: importer.Default()}
+			_, err = config.Check("sandbox", fileSet, []*ast.File{file}, nil)
+			require.NoError(t, err, "generated enums must compile")
+			if tt.name == "explicit member names preserve punctuation values" {
+				require.Contains(t, string(files[0].Data), `FooBazAll`)
+				require.Contains(t, string(files[0].Data), `"*"`)
+			}
+		})
+	}
+}
 
 func TestTypesFromSchema_OutputGo(t *testing.T) {
 	schema := `

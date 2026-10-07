@@ -88,12 +88,53 @@ func (formatter *typeFormatter) formatEnumDef(def ir.Object) string {
 
 	buffer.WriteString("const (\n")
 	for _, val := range enumType.Values {
-		name := tools.CleanupNames(formatObjectName(val.Name))
+		name := formatEnumMemberName(val.Name)
 		fmt.Fprintf(&buffer, "\t%s %s = %#v\n", name, enumName, val.Value)
 	}
 	buffer.WriteString(")\n")
 
 	return buffer.String()
+}
+
+func formatEnumMemberName(name string) string {
+	return tools.CleanupNames(formatObjectName(name))
+}
+
+// Validate the final Go identifiers after enum members have been prefixed and
+// normalized. Distinct schema values must not silently become conflicting Go
+// declarations.
+func validateEnumMemberNames(schema *ir.Schema) error {
+	objectNames := make(map[string]string)
+	schema.Objects.Iterate(func(_ string, object ir.Object) {
+		objectNames[formatObjectName(object.Name)] = object.Name
+	})
+
+	var err error
+	type enumMember struct {
+		enumName string
+		value    ir.EnumValue
+	}
+	members := make(map[string]enumMember)
+	schema.Objects.Iterate(func(_ string, object ir.Object) {
+		if err != nil || !object.Type.IsEnum() {
+			return
+		}
+
+		for _, member := range object.Type.AsEnum().Values {
+			name := formatEnumMemberName(member.Name)
+			if conflictingObject, exists := objectNames[name]; exists {
+				err = fmt.Errorf("Go enum %q: member %#v generates identifier %q, which conflicts with object %q; set explicit, distinct enum member names", schema.Package+"."+object.Name, member.Value, name, conflictingObject)
+				return
+			}
+			if previous, exists := members[name]; exists {
+				err = fmt.Errorf("Go enums %q and %q: members %#v and %#v generate the same identifier %q; set explicit, distinct enum member names", schema.Package+"."+previous.enumName, schema.Package+"."+object.Name, previous.value.Value, member.Value, name)
+				return
+			}
+			members[name] = enumMember{enumName: object.Name, value: member}
+		}
+	})
+
+	return err
 }
 
 func (formatter *typeFormatter) doFormatType(def ir.Type, resolveBuilders bool) string {

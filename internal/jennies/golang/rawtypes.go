@@ -51,6 +51,10 @@ func (jenny RawTypes) Generate(context languages.Context) (codejen.Files, error)
 }
 
 func (jenny RawTypes) generateSchema(context languages.Context, schema *ir.Schema) ([]byte, error) {
+	if err := validateEnumMemberNames(schema); err != nil {
+		return nil, err
+	}
+
 	var buffer strings.Builder
 	var err error
 
